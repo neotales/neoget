@@ -72,3 +72,63 @@ pub struct JournalEntry {
     pub state: JournalState,
     pub authorization: Authorization,
 }
+/// An owned-binary proposal only. No files are downloaded, extracted, or published.
+#[derive(Debug, PartialEq)]
+pub struct OwnedBinaryPlan {
+    pub tool: String,
+    pub asset: String,
+    pub member: Option<String>,
+    pub executable: String,
+}
+
+/// Resolve a configured GitHub tool/alias and exact asset/member metadata before
+/// extraction. Rename changes only the proposed owned executable basename.
+/// Native packages are not eligible. This function performs no side effects.
+pub fn plan_owned_binary(
+    bundle: &neoget_config::Bundle,
+    name: &str,
+    assets: &[String],
+    members: &[neoget_config::ArchiveEntry],
+    version: &str,
+    os: &str,
+    arch: &str,
+) -> neoget_core::Outcome<OwnedBinaryPlan> {
+    bundle.validate()?;
+    let (canonical, tool) = bundle.tool(name).ok_or_else(|| {
+        neoget_core::CoreError::provider_failure(
+            "TOOL_NOT_FOUND",
+            "tool or alias is not configured",
+        )
+    })?;
+    if tool.provider != "github" {
+        return Err(neoget_core::CoreError::Unsupported(
+            "owned binary planning for native packages",
+        ));
+    }
+    let pinned = bundle.pins.get(canonical).or(tool.version.as_ref());
+    if pinned.is_some_and(|pin| pin != version) {
+        return Err(neoget_core::CoreError::provider_failure(
+            "VERSION_CONFLICT",
+            "resolved version differs from configured exact version",
+        ));
+    }
+    let selection = tool.asset.as_ref().ok_or_else(|| {
+        neoget_core::CoreError::provider_failure(
+            "CONFIG_INVALID",
+            "GitHub tool requires asset selection",
+        )
+    })?;
+    let asset = selection.select(assets, version, os, arch)?.to_owned();
+    let member = selection
+        .member
+        .as_ref()
+        .map(|filter| filter.select(members).map(|entry| entry.path.clone()))
+        .transpose()?;
+    let executable = tool.rename.as_deref().unwrap_or(canonical);
+    Ok(OwnedBinaryPlan {
+        tool: canonical.to_owned(),
+        asset,
+        member,
+        executable: executable.to_owned(),
+    })
+}

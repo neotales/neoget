@@ -1,6 +1,11 @@
 # Neoget
 
-Neoget is a standalone, daemonless Rust package-management foundation. The workspace separates shared contracts (`neoget-core`), planning and authorization state (`neoget-engine`), provider interfaces (`neoget-providers`), and the `neoget` command-line presentation layer.
+Neoget is a standalone, daemonless Rust package-management foundation. The workspace separates shared contracts (`neoget-core`), strict configuration (`neoget-config`), planning and authorization state (`neoget-engine`), provider interfaces (`neoget-providers`), and the `neoget` command-line presentation layer.
+
+Bundle v1 TOML/YAML validation, tool aliases, root selection, and pure owned
+GitHub binary selection/rename planning are available. See the
+[config contract](docs/config.md) and [implementation handoff](docs/config-handoff.md)
+for the focused tool-only interchange format and the unverified Neoenv compatibility boundary.
 
 **Status:** initial scaffold plus eight provider adapter command-construction modules (winget, Chocolatey, apt, pacman, DNF, YUM, GitHub CLI, Aqua). They identify applicable platforms and construct selected inventory/upgrade argv vectors. These are pre-execution plans: there is no provider lifecycle execution, installed-package reconciliation, or claimed install/upgrade success. The provider library does expose a low-level streamed process API for constructed invocations; the CLI does not invoke it or execute package commands.
 
@@ -13,10 +18,10 @@ Install Rust 1.98.1 with Cargo. The repository pins this toolchain in `rust-tool
 Run from the repository root, in this order:
 
 ```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --workspace
+mise exec -- cargo fmt --check
+mise exec -- cargo clippy --workspace --all-targets -- -D warnings
+mise exec -- cargo test --workspace
+mise exec -- cargo build --workspace
 ```
 
 Rustfmt formatting is required before linting. `docs/commands.md` is generated from the static `CommandSpec` tree in `crates/neoget/src/main.rs`; `cargo test --workspace` checks that the checked-in document remains in sync.

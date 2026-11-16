@@ -160,3 +160,53 @@ impl Error for CoreError {
 
 /// Result returned by provider and engine operations.
 pub type Outcome<T> = Result<T, CoreError>;
+
+/// Parsed CLI target, preserving exact provider-native name and version text.
+/// Provider omission remains explicit; parsing never resolves ambiguous names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageTarget {
+    pub provider: Option<ProviderId>,
+    pub name: String,
+    pub exact_version: Option<String>,
+}
+
+impl PackageTarget {
+    /// Parse `[provider:]package[@exact-version]`, including `@scope/name`.
+    /// Rejects empty components, whitespace, controls, and option-like targets.
+    pub fn parse(input: &str) -> Outcome<Self> {
+        if input.is_empty()
+            || input.len() > 1024
+            || input.starts_with('-')
+            || input.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(CoreError::InvalidIdentity("invalid package target"));
+        }
+        let (provider, package) = match input.split_once(':') {
+            Some((provider, package)) => (Some(ProviderId::new(provider)?), package),
+            None => (None, input),
+        };
+        let (name, exact_version) = match package.rfind('@').filter(|index| *index > 0) {
+            Some(index) => (&package[..index], Some(&package[index + 1..])),
+            None => (package, None),
+        };
+        if name.is_empty()
+            || name.starts_with('-')
+            || name.contains(':')
+            || exact_version.is_some_and(|version| version.is_empty() || version.contains('@'))
+            || (name.contains('@')
+                && (!name.starts_with('@') || !name.contains('/') || name[1..].contains('@')))
+            || name == "@"
+            || name.starts_with("@/")
+            || name.ends_with('/')
+        {
+            return Err(CoreError::InvalidIdentity(
+                "invalid package target components",
+            ));
+        }
+        Ok(Self {
+            provider,
+            name: name.to_owned(),
+            exact_version: exact_version.map(str::to_owned),
+        })
+    }
+}

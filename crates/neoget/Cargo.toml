@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 neoget-core = { path = "../neoget-core" }
+neoget-config = { path = "../neoget-config" }
 
 [lints]
 workspace = true
