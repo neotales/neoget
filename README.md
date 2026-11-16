@@ -2,7 +2,7 @@
 
 Neoget is a standalone, daemonless Rust package-management foundation. The workspace separates shared contracts (`neoget-core`), planning and authorization state (`neoget-engine`), provider interfaces (`neoget-providers`), and the `neoget` command-line presentation layer.
 
-**Status:** initial scaffold only. The CLI generates help, a command reference, and shell completion from a single command specification; package operations are not implemented. No OS package manager, network access, persistence, GUI, TUI, or MCP server is included.
+**Status:** initial scaffold plus eight provider adapter command-construction modules (winget, Chocolatey, apt, pacman, DNF, YUM, GitHub CLI, Aqua). They identify applicable platforms and construct selected inventory/upgrade argv vectors. These are pre-execution plans: there is no provider lifecycle execution, installed-package reconciliation, or claimed install/upgrade success. The process boundary supports streamed structured stdout/stderr events, but is not wired into the CLI.
 
 ## Prerequisites
 
@@ -27,4 +27,4 @@ The documented commands are `search`, `show`, `install`, `list`, `outdated`, `up
 
 Package targets use `[provider:]package[@exact-version]`, including scoped names such as `@scope/name`. Version text remains provider-native. Bare ambiguous names will require explicit resolution; installation will be idempotent and will not implicitly upgrade. Refresh is metadata-only. Provider-specific arguments after `--` are rejected until safe handling is designed.
 
-This scaffold does not implement providers or package execution. The initial provider matrix, networking, SQLite or other persistence, JSON/progress output, MCP, TUI/GUI, and native package-manager integrations are out of scope.
+Provider adapters currently expose command-construction foundations only. Native manager mutation is not run: authorization, preflight, journaling, and persistence are not implemented. GitHub CLI currently lists GitHub CLI extensions; Aqua exposes its CLI list command, not a Neoget config-aware inventory or network resolver. The process runner is not a package operation API. Networking, SQLite or other persistence, JSON/progress output, MCP, TUI, and GUI remain out of scope.
