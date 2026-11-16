@@ -8,6 +8,11 @@ rust-version.workspace = true
 [dependencies]
 neoget-core = { path = "../neoget-core" }
 neoget-config = { path = "../neoget-config" }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
