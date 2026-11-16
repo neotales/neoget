@@ -10,9 +10,12 @@ impl Adapter for Apt {
         matches!(host, Host::Linux)
     }
     fn executable(&self) -> &'static str {
-        "apt-get"
+        "dpkg-query"
     }
     fn command(&self, operation: Operation, _package: Option<&str>) -> Result<Invocation, String> {
+        if operation == Operation::Inventory && _package.is_some() {
+            return Err("provider inventory does not accept a package filter".into());
+        }
         let args = match operation {
             Operation::Inventory => vec!["-W", "-f=${binary:Package}\t${Version}\n"]
                 .into_iter()

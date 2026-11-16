@@ -1,7 +1,41 @@
 //! Provider command adapters and a bounded, streamed process boundary.
+//!
+//! # Use the streamed process context
+//!
+//! The context owns neither runner nor sink; the caller controls both and may clone its
+//! cancellation token before starting `run`. An error can follow already delivered output.
+//!
+//! ```rust
+//! use neoget_providers::{
+//!     CancellationToken, ExecutionContext, Invocation, ProcessEvent, ProcessRunner,
+//!     ProcessError,
+//! };
+//! struct PlannedRunner;
+//! impl ProcessRunner for PlannedRunner {
+//!     fn run(
+//!         &self,
+//!         invocation: &Invocation,
+//!         _cancellation: &CancellationToken,
+//!         sink: &mut dyn FnMut(ProcessEvent),
+//!     ) -> Result<i32, ProcessError> {
+//!         assert_eq!(invocation.args, ["--version"]);
+//!         sink(ProcessEvent::Stdout("version output".into()));
+//!         Ok(0)
+//!     }
+//! }
+//! let mut events = Vec::new();
+//! let runner = PlannedRunner;
+//! let mut sink = |event| events.push(event);
+//! let mut context = ExecutionContext::streaming(&runner, &mut sink);
+//! let invocation = Invocation { program: "tool".into(), args: vec!["--version".into()] };
+//! assert_eq!(context.run(&invocation)?, 0);
+//! assert_eq!(events, [ProcessEvent::Stdout("version output".into())]);
+//! # Ok::<(), ProcessError>(())
+//! ```
 mod process;
 pub use process::{
-    ExecutionContext, Invocation, OutputPolicy, ProcessEvent, ProcessRunner, SystemRunner,
+    CancellationToken, ExecutionContext, Invocation, ProcessError, ProcessErrorKind, ProcessEvent,
+    ProcessRunner, SystemRunner,
 };
 mod apt;
 mod aqua;
@@ -37,10 +71,18 @@ pub trait Adapter {
     fn id(&self) -> &'static str;
     fn applies(&self, host: Host) -> bool;
     fn executable(&self) -> &'static str;
-    /// Checks whether the provider executable is discoverable through the supplied probe.
-    fn executable_available(&self, probe: &dyn ExecutableProbe) -> bool {
-        probe.available(self.executable())
+    /// Checks all executable prerequisites for the specific operation.
+    fn executable_available(
+        &self,
+        operation: Operation,
+        probe: &dyn ExecutableProbe,
+    ) -> Result<bool, String> {
+        self.command(operation, None)
+            .map(|invocation| probe.available(&invocation.program))
     }
+    /// Constructs an argv vector. `package=None` means provider-wide inventory/upgrade;
+    /// `Some(name)` is a native package target. Inventory filters are unsupported and must
+    /// be rejected; adapters without targeted upgrades reject `Some(name)` explicitly.
     fn command(&self, operation: Operation, package: Option<&str>) -> Result<Invocation, String>;
     /// Executes only a constructed provider command through the explicit streamed process context.
     /// A zero exit code reports process completion, not verified package lifecycle success.
@@ -49,8 +91,10 @@ pub trait Adapter {
         execution: &mut ExecutionContext<'_>,
         operation: Operation,
         package: Option<&str>,
-    ) -> Result<i32, String> {
-        let invocation = self.command(operation, package)?;
+    ) -> Result<i32, ProcessError> {
+        let invocation = self
+            .command(operation, package)
+            .map_err(|_| ProcessError::adapter())?;
         execution.run(&invocation)
     }
 }
@@ -66,14 +110,40 @@ impl ExecutableProbe for PathExecutableProbe {
         std::env::var_os("PATH").is_some_and(|paths| {
             std::env::split_paths(&paths).any(|directory| {
                 let candidate = directory.join(executable);
-                candidate.is_file()
-                    || cfg!(windows)
-                        && ["exe", "cmd", "bat"]
-                            .iter()
-                            .any(|extension| candidate.with_extension(extension).is_file())
+                if executable_file(&candidate) {
+                    return true;
+                }
+                #[cfg(windows)]
+                if candidate.extension().is_none() {
+                    return ["exe", "cmd", "bat"]
+                        .iter()
+                        .any(|extension| executable_file(&candidate.with_extension(extension)));
+                }
+                false
             })
         })
     }
+}
+#[cfg(unix)]
+fn executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+#[cfg(windows)]
+fn executable_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            ["exe", "com", "cmd", "bat"]
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
+        && path.is_file()
+}
+#[cfg(not(any(unix, windows)))]
+fn executable_file(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 /// Registered adapters, one distinct concrete type per provider, in stable order.
 pub fn registry() -> Vec<Box<dyn Adapter>> {
@@ -118,7 +188,7 @@ mod tests {
             ps[7].command(Operation::Inventory, None).unwrap(),
         ];
         assert_eq!(commands[0].args, ["list"]);
-        assert_eq!(commands[1].args, ["list", "--local-only"]);
+        assert_eq!(commands[1].args, ["list"]);
         assert_eq!(commands[2].program, "dpkg-query");
         assert_eq!(commands[3].args, ["-Q"]);
         assert_eq!(commands[4].args, ["list", "--installed"]);
@@ -143,6 +213,12 @@ mod tests {
         assert!(Github.applies(Host::Windows));
         assert!(Aqua.applies(Host::Macos));
         assert!(
+            Chocolatey
+                .command(Operation::Inventory, Some("ignored"))
+                .unwrap_err()
+                .contains("does not accept")
+        );
+        assert!(
             Pacman
                 .command(Operation::UpgradeAll, Some("x"))
                 .unwrap_err()
@@ -165,11 +241,23 @@ mod tests {
         struct Probe;
         impl ExecutableProbe for Probe {
             fn available(&self, executable: &str) -> bool {
-                executable == "pacman"
+                executable == "pacman" || executable == "dpkg-query"
             }
         }
-        assert!(Pacman.executable_available(&Probe));
-        assert!(!Apt.executable_available(&Probe));
+        assert!(
+            Pacman
+                .executable_available(Operation::Inventory, &Probe)
+                .unwrap()
+        );
+        assert!(
+            Apt.executable_available(Operation::Inventory, &Probe)
+                .unwrap()
+        );
+        assert!(
+            Apt.executable_available(Operation::UpgradeAll, &Probe)
+                .unwrap_err()
+                .contains("unsupported")
+        );
         assert!(Winget.applies(Host::Windows));
         assert!(!Winget.applies(Host::Linux));
         assert!(Github.applies(Host::Macos));

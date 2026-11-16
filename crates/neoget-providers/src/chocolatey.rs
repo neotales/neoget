@@ -1,4 +1,5 @@
 //! chocolatey adapter: command construction only; execution is not authorized here.
+//! Inventory assumes Chocolatey CLI v2+, where `choco list` defaults to local packages.
 use crate::{Adapter, Host, Invocation, Operation};
 /// Stable chocolatey provider adapter.
 pub struct Chocolatey;
@@ -13,11 +14,11 @@ impl Adapter for Chocolatey {
         "choco"
     }
     fn command(&self, operation: Operation, _package: Option<&str>) -> Result<Invocation, String> {
+        if operation == Operation::Inventory && _package.is_some() {
+            return Err("provider inventory does not accept a package filter".into());
+        }
         let args = match operation {
-            Operation::Inventory => vec!["list", "--local-only"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            Operation::Inventory => vec!["list".to_owned()],
             Operation::UpgradeAll => return Err("unsupported operation: choco upgrade all".into()),
         };
         Ok(Invocation {

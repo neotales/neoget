@@ -13,6 +13,9 @@ impl Adapter for Pacman {
         "pacman"
     }
     fn command(&self, operation: Operation, package: Option<&str>) -> Result<Invocation, String> {
+        if operation == Operation::Inventory && package.is_some() {
+            return Err("provider inventory does not accept a package filter".into());
+        }
         let args = match operation {
             Operation::Inventory => vec!["-Q"].into_iter().map(str::to_owned).collect(),
             Operation::UpgradeAll => {

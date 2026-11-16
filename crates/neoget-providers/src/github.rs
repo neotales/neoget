@@ -13,6 +13,9 @@ impl Adapter for Github {
         "gh"
     }
     fn command(&self, operation: Operation, _package: Option<&str>) -> Result<Invocation, String> {
+        if operation == Operation::Inventory && _package.is_some() {
+            return Err("provider inventory does not accept a package filter".into());
+        }
         let args = match operation {
             Operation::Inventory => vec!["extension", "list"]
                 .into_iter()
