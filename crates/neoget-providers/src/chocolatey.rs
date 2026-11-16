@@ -1,7 +1,10 @@
 //! chocolatey adapter: command construction only; execution is not authorized here.
 //! Inventory assumes Chocolatey CLI v2+, where `choco list` defaults to local packages.
 use crate::{Adapter, Host, Invocation, Operation};
-/// Stable chocolatey provider adapter.
+/// Chocolatey command adapter.
+///
+/// Inventory assumes Chocolatey CLI v2 or later, where `choco list` lists local
+/// packages by default and the removed `--local-only` switch is invalid.
 pub struct Chocolatey;
 impl Adapter for Chocolatey {
     fn id(&self) -> &'static str {

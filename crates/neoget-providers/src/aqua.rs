@@ -1,6 +1,9 @@
 //! aqua adapter: command construction only; execution is not authorized here.
 use crate::{Adapter, Host, Invocation, Operation};
-/// Stable aqua provider adapter.
+/// Aqua CLI adapter.
+///
+/// Its inventory command delegates to `aqua list`; this adapter does not read
+/// Aqua configuration paths or reconcile configuration with installed tools.
 pub struct Aqua;
 impl Adapter for Aqua {
     fn id(&self) -> &'static str {

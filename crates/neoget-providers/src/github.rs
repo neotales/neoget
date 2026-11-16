@@ -1,6 +1,9 @@
 //! github adapter: command construction only; execution is not authorized here.
 use crate::{Adapter, Host, Invocation, Operation};
-/// Stable github provider adapter.
+/// GitHub CLI adapter.
+///
+/// Its inventory command lists installed `gh` extensions only; it is not a
+/// general installed-software inventory or a GitHub release resolver.
 pub struct Github;
 impl Adapter for Github {
     fn id(&self) -> &'static str {
