@@ -1,2 +1,4 @@
 /target/
 **/*.rs.bk
+.opencode/goals/
+.opencode/goal-locks/
