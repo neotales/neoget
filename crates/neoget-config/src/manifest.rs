@@ -2,7 +2,7 @@
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Format, parse};
+use crate::{Format, parse, present_string, strict_string, string_list, unique_map};
 use neoget_core::{CoreError, Outcome, ProviderId};
 
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
@@ -16,7 +16,9 @@ fn invalid(message: &'static str) -> CoreError {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub version: u32,
+    #[serde(deserialize_with = "unique_map")]
     pub packages: BTreeMap<String, ManifestPackage>,
+    #[serde(deserialize_with = "string_list")]
     pub roots: Vec<String>,
 }
 
@@ -24,13 +26,15 @@ pub struct Manifest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestPackage {
+    #[serde(deserialize_with = "strict_string")]
     pub provider: String,
+    #[serde(deserialize_with = "strict_string")]
     pub package: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_string")]
     pub version: Option<String>,
     #[serde(default)]
     pub platforms: Vec<Platform>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_list")]
     pub dependencies: Vec<String>,
 }
 
@@ -102,8 +106,8 @@ impl Manifest {
         }
         for (id, package) in &self.packages {
             if !atom(id)
-                || !atom(&package.package)
-                || package.version.as_ref().is_some_and(|v| !atom(v))
+                || !native_text(&package.package)
+                || package.version.as_ref().is_some_and(|v| !native_text(v))
             {
                 return Err(invalid(
                     "invalid package identifier, name, or exact version",
@@ -136,6 +140,39 @@ impl Manifest {
     }
 
     /// Select the dependency closure for a supported host without executing anything.
+    ///
+    /// Roots are always required. A platform-inapplicable root is an error, while
+    /// an inapplicable dependency branch is omitted. Selected identities may recur
+    /// only with the same exact version: an omitted version is not a wildcard and
+    /// conflicts with a declared version for the same provider/package identity.
+    ///
+    /// ```
+    /// use neoget_config::{Format, HostPlatform, parse_manifest};
+    ///
+    /// let source = r#"
+    /// version = 1
+    /// roots = ["editor"]
+    /// [packages.editor]
+    /// provider = "apt"
+    /// package = "editor"
+    /// version = "1.0"
+    /// "#;
+    /// let manifest = match parse_manifest(source, Format::Toml) {
+    ///     Ok(manifest) => manifest,
+    ///     Err(error) => {
+    ///         eprintln!("manifest rejected: {error}");
+    ///         return;
+    ///     }
+    /// };
+    /// let selected = match manifest.resolve(HostPlatform::Linux) {
+    ///     Ok(selection) => selection,
+    ///     Err(error) => {
+    ///         eprintln!("selection rejected: {error}");
+    ///         return;
+    ///     }
+    /// };
+    /// assert!(selected.packages.contains_key("editor"));
+    /// ```
     pub fn resolve(&self, host: HostPlatform) -> Outcome<ResolvedManifest> {
         self.validate()?;
         let mut selected = BTreeSet::new();
@@ -243,4 +280,11 @@ fn atom(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
         && value != "."
         && value != ".."
+}
+
+fn native_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && !value.chars().any(char::is_control)
+        && !value.chars().any(char::is_whitespace)
 }

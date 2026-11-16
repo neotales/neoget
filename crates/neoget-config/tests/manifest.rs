@@ -100,3 +100,57 @@ script="run arbitrary code"
         .is_err()
     );
 }
+
+#[test]
+fn yaml_uses_strict_maps_strings_and_present_value_semantics() {
+    for source in [
+        "version: 1\nroots: [app]\npackages:\n  app:\n    provider: apt\n    package: app\n  app:\n    provider: apt\n    package: other\n",
+        "version: 1\nroots: [app]\npackages:\n  app:\n    provider: apt\n    package: app\n    dependencies: [missing]\n    dependencies: [missing]\n",
+        "version: 1\nroots: [app]\npackages:\n  app:\n    provider: null\n    package: app\n",
+        "version: 1\nroots: [app]\npackages:\n  app:\n    provider: apt\n    package: 42\n",
+        "version: 1\nroots: [app]\npackages:\n  app:\n    provider: apt\n    package: app\n    version: null\n",
+        "version: 1\nroots: [app]\npackages:\n  app:\n    provider: apt\n    package: app\n    dependencies: missing\n",
+    ] {
+        assert!(
+            parse_manifest(source, Format::Yaml).is_err(),
+            "accepted invalid YAML: {source}"
+        );
+    }
+}
+
+#[test]
+fn accepts_provider_native_identities_and_omitted_versions_are_not_wildcards() {
+    let scoped = r#"version=1
+roots=["root"]
+[packages.root]
+provider="npm"
+package="@scope/name/path"
+version="1.2.3+build:vendor"
+"#;
+    let selected = parse_manifest(scoped, Format::Toml)
+        .unwrap()
+        .resolve(HostPlatform::Linux)
+        .unwrap();
+    assert_eq!(selected.packages["root"].package, "@scope/name/path");
+    assert_eq!(
+        selected.packages["root"].version.as_deref(),
+        Some("1.2.3+build:vendor")
+    );
+
+    let omitted_conflict = r#"version=1
+roots=["a","b"]
+[packages.a]
+provider="apt"
+package="same"
+version="1"
+[packages.b]
+provider="apt"
+package="same"
+"#;
+    assert!(
+        parse_manifest(omitted_conflict, Format::Toml)
+            .unwrap()
+            .resolve(HostPlatform::Linux)
+            .is_err()
+    );
+}
