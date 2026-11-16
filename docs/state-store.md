@@ -8,16 +8,33 @@ caller must create and secure the parent directory (including private-user
 permissions) before opening the database; the store does not create directories
 or resolve/reject symbolic links. SQLite is bundled and compiled with Rust 1.100.0.
 Concurrent writers are serialized by SQLite with a five-second busy timeout.
+Use a separate handle for each overlapping operation: a handle is not `Sync`.
+Ordering between connections is unspecified, and multiple calls do not form a
+single transaction. The timeout is SQLite's lock-wait policy, not a whole-call
+deadline. Dropping a handle closes its connection.
 Database failures return `STATE_STORE_ERROR` and retain the SQLite cause.
 Contention/timeout means the operation did not report success; idempotent
 source and pin operations can safely be retried.
 
-`open` applies schema migrations. Source imports validate every entry before
+`open` atomically applies schema migrations to an empty database. Existing
+versioned stores must have the exact ordered columns, declared types, nullability,
+and primary-key/unique-index semantics required by this schema, including
+migration history. Incompatible or preexisting unversioned schemas return
+`STATE_SCHEMA_INVALID`; newer schemas return `STATE_SCHEMA_FUTURE`. Rejection
+does not rewrite existing schema/data. Opening does not attest to all row contents:
+source/pin reads validate every reconstructed record with the same source-driver
+rules and public identity constructors used for writes. Invalid fields, invalid
+text, or wrong SQLite storage types return `STATE_RECORD_CORRUPT` with a cause;
+list reads never return partial results. Pins follow `ProviderId` rather than
+the source-driver allowlist, and preserve provider-native names/versions.
+
+Source imports validate every entry before
 starting a transaction; duplicate source keys update metadata idempotently.
 Source removal and pin removal are repeat-safe. Source updates alter metadata
 only, and unsupported drivers return a typed `Unsupported` error. Pins bind a
 provider/name to an observed exact version; attempting to replace it with a
 different version returns `PIN_CONFLICT`.
+The `StateStore` rustdoc includes a compiled open/pin/conflict/cleanup example.
 
 Bundle plans store the same versioned deterministic JSON encoding whose bytes
 are hashed with SHA-256 and persisted. Digest reuse with different bytes is
