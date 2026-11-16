@@ -8,6 +8,8 @@ use std::{
 };
 mod neoenv;
 pub use neoenv::*;
+mod manifest;
+pub use manifest::*;
 mod roots;
 pub use roots::*;
 mod diagnostic;
