@@ -104,6 +104,12 @@ pub struct PackageRecord {
 #[derive(Debug)]
 pub enum CoreError {
     InvalidIdentity(&'static str),
+    /// A stable state-store failure retaining its underlying database cause.
+    StateStore {
+        code: &'static str,
+        message: &'static str,
+        source: Box<dyn Error + Send + Sync>,
+    },
     ProviderFailure {
         code: &'static str,
         message: String,
@@ -140,6 +146,7 @@ impl fmt::Display for CoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidIdentity(message) => write!(f, "invalid identity: {message}"),
+            Self::StateStore { code, message, .. } => write!(f, "{code}: {message}"),
             Self::ProviderFailure { code, message, .. } => write!(f, "{code}: {message}"),
             Self::Unsupported(operation) => write!(f, "unsupported operation: {operation}"),
         }
@@ -153,6 +160,7 @@ impl Error for CoreError {
                 source: Some(source),
                 ..
             } => Some(source.as_ref()),
+            Self::StateStore { source, .. } => Some(source.as_ref()),
             _ => None,
         }
     }

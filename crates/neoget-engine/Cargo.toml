@@ -10,6 +10,8 @@ neoget-core = { path = "../neoget-core" }
 neoget-config = { path = "../neoget-config" }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"

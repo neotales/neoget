@@ -1,5 +1,6 @@
 //! Typed request, planning, authorization, and journal state for frontends.
 use neoget_core::{PackageIdentity, ProviderId};
+use rusqlite::OptionalExtension;
 use sha2::Digest;
 
 /// SQLite-backed per-user state. Opening a store applies all pending schema migrations.
@@ -23,29 +24,41 @@ pub struct BundlePlan {
     pub intents: Vec<PackageIdentity>,
 }
 
+/// A stored exact pin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Pin {
+    pub driver: String,
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanEncoding {
+    format: u32,
+    intents: Vec<PlanIntent>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanIntent {
+    driver: String,
+    name: String,
+    version: Option<String>,
+}
+
 impl StateStore {
     /// Opens the database at the caller-selected path and atomically applies migrations.
     /// No platform home-directory assumptions are made.
     pub fn open(path: impl AsRef<std::path::Path>) -> neoget_core::Outcome<Self> {
-        let connection = rusqlite::Connection::open(path)
-            .map_err(|_| store_error("could not open state database"))?;
+        let mut connection = rusqlite::Connection::open(path)
+            .map_err(|error| store_error(error, "could not open state database"))?;
         connection
-            .execute_batch(
-                "PRAGMA foreign_keys=ON;
-                 CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
-                 BEGIN IMMEDIATE;
-                 CREATE TABLE IF NOT EXISTS sources(
-                   driver TEXT NOT NULL, scope TEXT NOT NULL, name TEXT NOT NULL,
-                   location TEXT NOT NULL, PRIMARY KEY(driver,scope,name));
-                 CREATE TABLE IF NOT EXISTS pins(
-                   driver TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL,
-                   PRIMARY KEY(driver,name));
-                 CREATE TABLE IF NOT EXISTS bundle_plans(
-                   digest TEXT PRIMARY KEY, intents TEXT NOT NULL);
-                 INSERT OR IGNORE INTO schema_migrations(version) VALUES(1);
-                 COMMIT;",
-            )
-            .map_err(|_| store_error("could not migrate state database"))?;
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| {
+                store_error(error, "could not configure database contention timeout")
+            })?;
+        migrate(&mut connection)?;
         Ok(Self { connection })
     }
 
@@ -58,14 +71,14 @@ impl StateStore {
         let transaction = self
             .connection
             .transaction()
-            .map_err(|_| store_error("could not begin source import"))?;
+            .map_err(|error| store_error(error, "could not begin source import"))?;
         for source in sources {
             transaction.execute("INSERT INTO sources VALUES(?1,?2,?3,?4) ON CONFLICT(driver,scope,name) DO UPDATE SET location=excluded.location", [&source.driver, &source.scope, &source.name, &source.location])
-                .map_err(|_| store_error("could not import sources"))?;
+                .map_err(|error| store_error(error, "could not import sources"))?;
         }
         transaction
             .commit()
-            .map_err(|_| store_error("could not commit source import"))
+            .map_err(|error| store_error(error, "could not commit source import"))
     }
 
     /// Returns sources in stable key order.
@@ -73,7 +86,7 @@ impl StateStore {
         let mut statement = self
             .connection
             .prepare("SELECT driver,scope,name,location FROM sources ORDER BY driver,scope,name")
-            .map_err(|_| store_error("could not read sources"))?;
+            .map_err(|error| store_error(error, "could not read sources"))?;
         let rows = statement
             .query_map([], |row| {
                 Ok(Source {
@@ -83,9 +96,9 @@ impl StateStore {
                     location: row.get(3)?,
                 })
             })
-            .map_err(|_| store_error("could not read sources"))?;
+            .map_err(|error| store_error(error, "could not read sources"))?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|_| store_error("could not read sources"))
+            .map_err(|error| store_error(error, "could not read sources"))
     }
 
     /// Removes a source by its complete normalized key; repeating removal is safe.
@@ -95,7 +108,7 @@ impl StateStore {
                 "DELETE FROM sources WHERE driver=?1 AND scope=?2 AND name=?3",
                 [driver, scope, name],
             )
-            .map_err(|_| store_error("could not remove source"))?;
+            .map_err(|error| store_error(error, "could not remove source"))?;
         Ok(())
     }
 
@@ -124,7 +137,13 @@ impl StateStore {
                 "UPDATE sources SET location=?4 WHERE driver=?1 AND scope=?2 AND name=?3",
                 [driver, scope, name, location],
             )
-            .map_err(|_| store_error("could not update source"))?;
+            .map_err(|error| store_error(error, "could not update source"))?;
+        if self.connection.changes() == 0 {
+            return Err(neoget_core::CoreError::provider_failure(
+                "SOURCE_NOT_FOUND",
+                "source key does not exist",
+            ));
+        }
         Ok(())
     }
 
@@ -148,8 +167,11 @@ impl StateStore {
                 "requested version differs from observed version",
             ));
         }
-        let result = self
+        let transaction = self
             .connection
+            .unchecked_transaction()
+            .map_err(|error| store_error(error, "could not begin pin transaction"))?;
+        transaction
             .execute(
                 "INSERT INTO pins VALUES(?1,?2,?3) ON CONFLICT(driver,name) DO NOTHING",
                 [
@@ -158,22 +180,23 @@ impl StateStore {
                     observed_version,
                 ],
             )
-            .map_err(|_| store_error("could not save pin"))?;
-        let existing: String = self
-            .connection
+            .map_err(|error| store_error(error, "could not save pin"))?;
+        let existing: String = transaction
             .query_row(
                 "SELECT version FROM pins WHERE driver=?1 AND name=?2",
                 [identity.provider().as_str(), identity.name()],
                 |row| row.get(0),
             )
-            .map_err(|_| store_error("could not read pin"))?;
-        let _ = result;
+            .map_err(|error| store_error(error, "could not read pin"))?;
         if existing != observed_version {
             return Err(neoget_core::CoreError::provider_failure(
                 "PIN_CONFLICT",
                 "a different version is already pinned",
             ));
         }
+        transaction
+            .commit()
+            .map_err(|error| store_error(error, "could not commit pin"))?;
         Ok(())
     }
 
@@ -184,8 +207,45 @@ impl StateStore {
                 "DELETE FROM pins WHERE driver=?1 AND name=?2",
                 [driver, name],
             )
-            .map_err(|_| store_error("could not remove pin"))?;
+            .map_err(|error| store_error(error, "could not remove pin"))?;
         Ok(())
+    }
+
+    /// Lists stored pins in stable driver/name order.
+    pub fn pins(&self) -> neoget_core::Outcome<Vec<Pin>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT driver,name,version FROM pins ORDER BY driver,name")
+            .map_err(|error| store_error(error, "could not read pins"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(Pin {
+                    driver: row.get(0)?,
+                    name: row.get(1)?,
+                    version: row.get(2)?,
+                })
+            })
+            .map_err(|error| store_error(error, "could not read pins"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| store_error(error, "could not read pins"))
+    }
+
+    /// Looks up one pin, returning `None` when that provider/name is not pinned.
+    pub fn pin_for(&self, driver: &str, name: &str) -> neoget_core::Outcome<Option<Pin>> {
+        self.connection
+            .query_row(
+                "SELECT driver,name,version FROM pins WHERE driver=?1 AND name=?2",
+                [driver, name],
+                |row| {
+                    Ok(Pin {
+                        driver: row.get(0)?,
+                        name: row.get(1)?,
+                        version: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| store_error(error, "could not read pin"))
     }
 
     /// Persists a canonical digest and normalized package intents, without executing them.
@@ -212,41 +272,93 @@ impl StateStore {
                 ));
             }
         }
-        let canonical = normalized
-            .iter()
-            .map(|i| {
-                format!(
-                    "{}:{}@{}",
-                    i.provider(),
-                    i.name(),
-                    i.exact_version().unwrap_or("")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let digest = format!("{:x}", sha2::Sha256::digest(canonical.as_bytes()));
-        let intents_json = normalized
-            .iter()
-            .map(|i| {
-                format!(
-                    "{}:{}@{}",
-                    i.provider(),
-                    i.name(),
-                    i.exact_version().unwrap_or("")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.connection
-            .execute(
-                "INSERT OR IGNORE INTO bundle_plans VALUES(?1,?2)",
-                [&digest, &intents_json],
+        let encoding = PlanEncoding {
+            format: 1,
+            intents: normalized
+                .iter()
+                .map(|i| PlanIntent {
+                    driver: i.provider().as_str().to_owned(),
+                    name: i.name().to_owned(),
+                    version: i.exact_version().map(str::to_owned),
+                })
+                .collect(),
+        };
+        let encoded = serde_json::to_vec(&encoding)
+            .map_err(|error| store_error(error, "could not encode bundle plan"))?;
+        let digest = format!("{:x}", sha2::Sha256::digest(&encoded));
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|error| store_error(error, "could not begin plan transaction"))?;
+        let previous: Option<Vec<u8>> = transaction
+            .query_row(
+                "SELECT intents FROM bundle_plans WHERE digest=?1",
+                [&digest],
+                |row| row.get(0),
             )
-            .map_err(|_| store_error("could not save bundle plan"))?;
+            .optional()
+            .map_err(|error| store_error(error, "could not inspect bundle plan"))?;
+        if let Some(previous) = previous {
+            if previous != encoded {
+                return Err(neoget_core::CoreError::provider_failure(
+                    "PLAN_DIGEST_CONFLICT",
+                    "stored plan digest maps to different intent bytes",
+                ));
+            }
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO bundle_plans VALUES(?1,?2)",
+                    rusqlite::params![digest, encoded],
+                )
+                .map_err(|error| store_error(error, "could not save bundle plan"))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| store_error(error, "could not commit bundle plan"))?;
         Ok(BundlePlan {
             digest,
             intents: normalized,
         })
+    }
+
+    /// Loads a plan by digest and verifies its stored bytes against the digest.
+    pub fn load_bundle_plan(&self, digest: &str) -> neoget_core::Outcome<Option<BundlePlan>> {
+        let encoded: Option<Vec<u8>> = self
+            .connection
+            .query_row(
+                "SELECT intents FROM bundle_plans WHERE digest=?1",
+                [digest],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| store_error(error, "could not load bundle plan"))?;
+        let Some(encoded) = encoded else {
+            return Ok(None);
+        };
+        if format!("{:x}", sha2::Sha256::digest(&encoded)) != digest {
+            return Err(neoget_core::CoreError::provider_failure(
+                "PLAN_CORRUPT",
+                "stored plan digest does not match its contents",
+            ));
+        }
+        let encoding: PlanEncoding = serde_json::from_slice(&encoded)
+            .map_err(|error| store_error(error, "stored plan encoding is invalid"))?;
+        if encoding.format != 1 {
+            return Err(neoget_core::CoreError::provider_failure(
+                "PLAN_FORMAT_UNSUPPORTED",
+                "stored plan encoding version is unsupported",
+            ));
+        }
+        let intents = encoding
+            .intents
+            .into_iter()
+            .map(|i| PackageIdentity::new(ProviderId::new(i.driver)?, i.name, i.version))
+            .collect::<neoget_core::Outcome<Vec<_>>>()?;
+        Ok(Some(BundlePlan {
+            digest: digest.to_owned(),
+            intents,
+        }))
     }
 }
 
@@ -255,6 +367,108 @@ fn supported_source_driver(driver: &str) -> bool {
         driver,
         "winget" | "chocolatey" | "apt" | "pacman" | "dnf" | "yum" | "github" | "aqua"
     )
+}
+fn migrate(connection: &mut rusqlite::Connection) -> neoget_core::Outcome<()> {
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| store_error(error, "could not begin schema migration"))?;
+    let user_version: i64 = transaction
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| store_error(error, "could not inspect schema version"))?;
+    if user_version > 1 {
+        return Err(neoget_core::CoreError::provider_failure(
+            "STATE_SCHEMA_FUTURE",
+            "database schema is newer than this application",
+        ));
+    }
+    if user_version < 0 {
+        return Err(neoget_core::CoreError::provider_failure(
+            "STATE_SCHEMA_INVALID",
+            "database schema version is malformed",
+        ));
+    }
+    let migration_table: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')", [], |row| row.get(0),
+    ).map_err(|error| store_error(error, "could not inspect migration history"))?;
+    if migration_table {
+        let columns = {
+            let mut statement = transaction
+                .prepare("PRAGMA table_info(schema_migrations)")
+                .map_err(|error| store_error(error, "could not inspect migration history"))?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| store_error(error, "could not inspect migration history"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| store_error(error, "could not inspect migration history"))?
+        };
+        if columns != ["version"] {
+            return Err(neoget_core::CoreError::provider_failure(
+                "STATE_SCHEMA_INVALID",
+                "migration history has an incompatible shape",
+            ));
+        }
+        let mut statement = transaction
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
+            .map_err(|error| store_error(error, "could not inspect migration history"))?;
+        let versions = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|error| store_error(error, "could not inspect migration history"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| store_error(error, "could not inspect migration history"))?;
+        if versions.iter().any(|version| *version != 1)
+            || (user_version == 1 && versions.as_slice() != [1])
+        {
+            return Err(neoget_core::CoreError::provider_failure(
+                "STATE_SCHEMA_INVALID",
+                "migration history is malformed or incompatible",
+            ));
+        }
+        if user_version == 0 && !versions.is_empty() {
+            return Err(neoget_core::CoreError::provider_failure(
+                "STATE_SCHEMA_INVALID",
+                "migration history disagrees with schema version",
+            ));
+        }
+    } else if user_version != 0 {
+        return Err(neoget_core::CoreError::provider_failure(
+            "STATE_SCHEMA_INVALID",
+            "versioned database is missing migration history",
+        ));
+    }
+    if user_version == 0 {
+        transaction.execute_batch(
+            "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY CHECK(version=1));
+             CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL,PRIMARY KEY(driver,scope,name));
+             CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(driver,name));
+             CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY,intents BLOB NOT NULL);
+             INSERT INTO schema_migrations(version) VALUES(1);
+             PRAGMA user_version=1;",
+        ).map_err(|error| store_error(error, "could not apply state schema migration"))?;
+    } else {
+        for (table, expected) in [
+            ("sources", vec!["driver", "scope", "name", "location"]),
+            ("pins", vec!["driver", "name", "version"]),
+            ("bundle_plans", vec!["digest", "intents"]),
+        ] {
+            let mut statement = transaction
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .map_err(|error| store_error(error, "could not inspect state schema"))?;
+            let actual = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| store_error(error, "could not inspect state schema"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| store_error(error, "could not inspect state schema"))?;
+            if actual != expected {
+                return Err(neoget_core::CoreError::provider_failure(
+                    "STATE_SCHEMA_INVALID",
+                    "state table has an incompatible shape",
+                ));
+            }
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|error| store_error(error, "could not commit schema migration"))
 }
 fn validate_source(source: &Source) -> neoget_core::Outcome<()> {
     if !supported_source_driver(&source.driver) {
@@ -272,8 +486,15 @@ fn validate_source(source: &Source) -> neoget_core::Outcome<()> {
     }
     Ok(())
 }
-fn store_error(message: &'static str) -> neoget_core::CoreError {
-    neoget_core::CoreError::provider_failure("STATE_STORE_ERROR", message)
+fn store_error(
+    error: impl std::error::Error + Send + Sync + 'static,
+    message: &'static str,
+) -> neoget_core::CoreError {
+    neoget_core::CoreError::StateStore {
+        code: "STATE_STORE_ERROR",
+        message,
+        source: Box::new(error),
+    }
 }
 
 /// User intent before resolution; package targets retain provider-native spelling.
