@@ -3,6 +3,29 @@ use neoget_core::{PackageIdentity, ProviderId};
 use rusqlite::OptionalExtension;
 use sha2::Digest;
 
+// Schema v1 accepts only the CREATE TABLE text emitted by this migration, not
+// arbitrary SQL that happens to produce matching PRAGMA metadata. SQLite does
+// not expose every CHECK/default/conflict/collation semantic through PRAGMAs.
+// Share the definitions with creation so this fail-closed contract cannot drift.
+const STATE_TABLE_DDL: &[(&str, &str)] = &[
+    (
+        "schema_migrations",
+        "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY CHECK(version=1))",
+    ),
+    (
+        "sources",
+        "CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL,PRIMARY KEY(driver,scope,name))",
+    ),
+    (
+        "pins",
+        "CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(driver,name))",
+    ),
+    (
+        "bundle_plans",
+        "CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY,intents BLOB NOT NULL)",
+    ),
+];
+
 /// SQLite-backed source, exact-pin, and desired-plan snapshots; no package execution.
 ///
 /// Paths are caller-selected. Relative paths use process cwd; creating and securing
@@ -88,6 +111,12 @@ impl StateStore {
     /// version with `STATE_SCHEMA_FUTURE`. Contention/I/O returns `STATE_STORE_ERROR`;
     /// opening, like writes, uses a five-second SQLite busy timeout (not a whole-call
     /// deadline). Failed migrations leave existing schema/data unchanged.
+    ///
+    /// Schema v1 requires the exact stored CREATE TABLE text emitted by its
+    /// migration, including its sole CHECK (`schema_migrations.version=1`).
+    /// Hand-authored rewrites (even equivalent SQL), extra constraints/defaults,
+    /// external indexes, and triggers on store tables are unsupported and return
+    /// `STATE_SCHEMA_INVALID`. Do not alter schema while any handle is open.
     pub fn open(path: impl AsRef<std::path::Path>) -> neoget_core::Outcome<Self> {
         let mut connection = rusqlite::Connection::open(path)
             .map_err(|error| store_error(error, "could not open state database"))?;
@@ -464,14 +493,34 @@ fn validate_table(
     table: &str,
     expected: &[(&str, &str, i64)],
 ) -> neoget_core::Outcome<()> {
-    let is_table: bool = connection
+    let expected_sql = STATE_TABLE_DDL
+        .iter()
+        .find_map(|(name, ddl)| (*name == table).then_some(*ddl))
+        .ok_or_else(schema_invalid)?;
+    let actual_sql = connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+            [table],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| store_error(error, "could not inspect state schema"))?
+        .flatten();
+    if actual_sql.as_deref() != Some(expected_sql) {
+        return Err(schema_invalid());
+    }
+    // An exact table definition does not exclude separately created restrictions.
+    // Even a non-unique expression index can make otherwise valid writes fail.
+    // Trigger tbl_name preserves the author's casing; SQLite identifiers do not.
+    let external_objects: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE tbl_name=?1 COLLATE NOCASE AND
+             (type='trigger' OR (type='index' AND sql IS NOT NULL)))",
             [table],
             |row| row.get(0),
         )
-        .map_err(|error| store_error(error, "could not inspect state schema"))?;
-    if !is_table {
+        .map_err(|error| store_error(error, "could not inspect state constraints"))?;
+    if external_objects {
         return Err(schema_invalid());
     }
     let mut statement = connection
@@ -626,14 +675,17 @@ fn migrate(connection: &mut rusqlite::Connection) -> neoget_core::Outcome<()> {
         if nonempty {
             return Err(schema_invalid());
         }
-        transaction.execute_batch(
-            "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY CHECK(version=1));
-             CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL,PRIMARY KEY(driver,scope,name));
-             CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(driver,name));
-             CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY,intents BLOB NOT NULL);
-             INSERT INTO schema_migrations(version) VALUES(1);
+        for &(_, ddl) in STATE_TABLE_DDL {
+            transaction
+                .execute_batch(ddl)
+                .map_err(|error| store_error(error, "could not apply state schema migration"))?;
+        }
+        transaction
+            .execute_batch(
+                "INSERT INTO schema_migrations(version) VALUES(1);
              PRAGMA user_version=1;",
-        ).map_err(|error| store_error(error, "could not apply state schema migration"))?;
+            )
+            .map_err(|error| store_error(error, "could not apply state schema migration"))?;
     } else {
         for (table, expected) in [
             (

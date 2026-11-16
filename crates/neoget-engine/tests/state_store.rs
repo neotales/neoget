@@ -139,6 +139,208 @@ fn source_import_database_failure_rolls_back_prior_rows() {
 }
 
 #[test]
+fn original_v1_migration_is_still_accepted() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("original.sqlite");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    // Independent fixture: the exact batch used before canonical DDL validation.
+    connection.execute_batch(
+        "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY CHECK(version=1));
+         CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL,PRIMARY KEY(driver,scope,name));
+         CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(driver,name));
+         CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY,intents BLOB NOT NULL);
+         INSERT INTO schema_migrations(version) VALUES(1);
+         INSERT INTO sources VALUES('apt','user','main','repo');
+         PRAGMA user_version=1;",
+    ).unwrap();
+    let before = schema_snapshot(&connection);
+    let store = StateStore::open(&database).unwrap();
+    assert_eq!(schema_snapshot(&connection), before);
+    assert_eq!(store.sources().unwrap()[0].location, "repo");
+    let package = PackageIdentity::new(ProviderId::new("apt").unwrap(), "curl", None).unwrap();
+    store.pin(&package, "8.0").unwrap();
+    assert_eq!(store.pins().unwrap().len(), 1);
+}
+
+#[test]
+fn unsupported_table_constraints_are_rejected_on_open() {
+    for (table, definition) in [
+        (
+            "sources",
+            "CREATE TABLE sources(driver TEXT NOT NULL CHECK(driver='blocked'),scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL,PRIMARY KEY(driver,scope,name))",
+        ),
+        (
+            "pins",
+            "CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL CHECK(version='blocked'),PRIMARY KEY(driver,name))",
+        ),
+        (
+            "bundle_plans",
+            "CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY,intents BLOB NOT NULL CHECK(length(intents)=0))",
+        ),
+        (
+            "schema_migrations",
+            "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY CHECK(version=1) CHECK(version<2))",
+        ),
+        (
+            "schema_migrations",
+            "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY)",
+        ),
+        (
+            "sources",
+            "CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL,PRIMARY KEY(driver,scope,name),FOREIGN KEY(driver,name) REFERENCES pins(driver,name))",
+        ),
+        (
+            "pins",
+            "CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(driver,name),FOREIGN KEY(driver) REFERENCES schema_migrations(version))",
+        ),
+        (
+            "bundle_plans",
+            "CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY REFERENCES schema_migrations(version),intents BLOB NOT NULL)",
+        ),
+        (
+            "schema_migrations",
+            "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY CHECK(version=1) REFERENCES pins(name))",
+        ),
+        (
+            "sources",
+            "CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL COLLATE NOCASE,PRIMARY KEY(driver,scope,name))",
+        ),
+        (
+            "pins",
+            "CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL COLLATE NOCASE,PRIMARY KEY(driver,name))",
+        ),
+        (
+            "bundle_plans",
+            "CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY,intents BLOB NOT NULL COLLATE NOCASE)",
+        ),
+        (
+            "schema_migrations",
+            "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY COLLATE NOCASE CHECK(version=1))",
+        ),
+        (
+            "sources",
+            "CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL DEFAULT 'repo',PRIMARY KEY(driver,scope,name))",
+        ),
+        (
+            "pins",
+            "CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL DEFAULT '1',PRIMARY KEY(driver,name))",
+        ),
+        (
+            "bundle_plans",
+            "CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY,intents BLOB NOT NULL DEFAULT x'00')",
+        ),
+        (
+            "schema_migrations",
+            "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY DEFAULT 1 CHECK(version=1))",
+        ),
+        (
+            "sources",
+            "CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL,PRIMARY KEY(driver,scope,name) ON CONFLICT REPLACE)",
+        ),
+        (
+            "pins",
+            "CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(driver,name) ON CONFLICT IGNORE)",
+        ),
+        (
+            "bundle_plans",
+            "CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY ON CONFLICT REPLACE,intents BLOB NOT NULL)",
+        ),
+        (
+            "schema_migrations",
+            "CREATE TABLE schema_migrations(version INTEGER NOT NULL PRIMARY KEY ON CONFLICT IGNORE CHECK(version=1))",
+        ),
+        (
+            "sources",
+            "CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL GENERATED ALWAYS AS ('repo') STORED,PRIMARY KEY(driver,scope,name))",
+        ),
+        (
+            "pins",
+            "CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL GENERATED ALWAYS AS ('1') VIRTUAL,PRIMARY KEY(driver,name))",
+        ),
+        (
+            "bundle_plans",
+            "CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY,intents BLOB NOT NULL GENERATED ALWAYS AS (x'00') STORED)",
+        ),
+        (
+            "pins",
+            "CREATE TABLE pins(driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(driver,name)) WITHOUT ROWID",
+        ),
+        (
+            "bundle_plans",
+            "CREATE TABLE bundle_plans(digest TEXT NOT NULL PRIMARY KEY,intents BLOB NOT NULL) STRICT",
+        ),
+        // v1 is deliberately fail-closed, even for equivalent hand-authored SQL.
+        (
+            "pins",
+            "CREATE TABLE pins (driver TEXT NOT NULL,name TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(driver,name))",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("constraints.sqlite");
+        drop(StateStore::open(&database).unwrap());
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection
+            .execute_batch(&format!("DROP TABLE {table}; {definition}"))
+            .unwrap();
+        if table == "schema_migrations" {
+            // Keep history valid so a rejection cannot pass vacuously on missing rows.
+            connection
+                .execute("INSERT INTO schema_migrations VALUES(1)", [])
+                .unwrap();
+        }
+        let before = schema_snapshot(&connection);
+        match StateStore::open(&database) {
+            Err(error) => assert!(
+                error.to_string().starts_with("STATE_SCHEMA_INVALID:"),
+                "{definition}: {error}"
+            ),
+            Ok(_) => panic!("unsupported table constraint accepted: {definition}"),
+        }
+        assert_eq!(schema_snapshot(&connection), before);
+    }
+}
+
+#[test]
+fn external_indexes_and_triggers_on_every_store_table_are_rejected() {
+    for (table, column) in [
+        ("schema_migrations", "version"),
+        ("sources", "location"),
+        ("pins", "version"),
+        ("bundle_plans", "intents"),
+    ] {
+        for definition in [
+            format!("CREATE INDEX hidden_restriction ON {table}({column})"),
+            format!("CREATE UNIQUE INDEX hidden_restriction ON {table}({column})"),
+            format!(
+                "CREATE TRIGGER hidden_restriction BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'blocked'); END"
+            ),
+            format!(
+                "CREATE TRIGGER hidden_restriction BEFORE INSERT ON {} BEGIN SELECT RAISE(ABORT,'blocked'); END",
+                table.to_ascii_uppercase()
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let database = directory.path().join("external.sqlite");
+            drop(StateStore::open(&database).unwrap());
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            connection.execute_batch(&definition).unwrap();
+            let before = schema_snapshot(&connection);
+            match StateStore::open(&database) {
+                Err(error) => assert!(
+                    error.to_string().starts_with("STATE_SCHEMA_INVALID:"),
+                    "{definition}: {error}"
+                ),
+                Ok(_) => panic!("external schema restriction accepted: {definition}"),
+            }
+            assert_eq!(schema_snapshot(&connection), before);
+        }
+    }
+}
+
+#[test]
 fn malformed_named_schemas_are_rejected_before_use() {
     for definition in [
         "CREATE TABLE sources(driver TEXT NOT NULL,scope TEXT NOT NULL,name TEXT NOT NULL,location TEXT NOT NULL)",

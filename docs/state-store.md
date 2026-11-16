@@ -21,7 +21,20 @@ versioned stores must have the exact ordered columns, declared types, nullabilit
 and primary-key/unique-index semantics required by this schema, including
 migration history. Incompatible or preexisting unversioned schemas return
 `STATE_SCHEMA_INVALID`; newer schemas return `STATE_SCHEMA_FUTURE`. Rejection
-does not rewrite existing schema/data. Opening does not attest to all row contents:
+does not rewrite existing schema/data.
+
+Schema v1 deliberately accepts only the exact SQLite-stored `CREATE TABLE` text
+emitted by its migration, shared internally between creation and validation.
+Equivalent hand-authored rewrites (including whitespace/casing/quoting changes)
+are not supported. The only CHECK is `schema_migrations.version=1`; no other
+CHECK, foreign-key, default, explicit collation, generated-column, custom conflict,
+STRICT, or WITHOUT ROWID clauses are supported. Store tables may have only their
+migration-created primary-key indexes: externally created indexes (even
+non-unique ones) and triggers are rejected too. These rules prevent constraints
+that are invisible to column/key PRAGMAs from changing valid write behavior.
+Do not alter schema externally while a handle is open.
+
+Opening does not attest to all row contents:
 source/pin reads validate every reconstructed record with the same source-driver
 rules and public identity constructors used for writes. Invalid fields, invalid
 text, or wrong SQLite storage types return `STATE_RECORD_CORRUPT` with a cause;
