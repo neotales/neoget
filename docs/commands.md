@@ -46,7 +46,7 @@
 
 ## `config check-neoenv`
 
-`neoget config check-neoenv <file> ` — Validate a tool-only Neoenv interchange file
+`neoget config check-neoenv <file> ` — Validate a native tool-only Neoenv file
 
 ## `search`
 
@@ -124,6 +124,12 @@ Targets use `[provider:]package[@exact-version]`; scoped npm-style names such as
 
 Command aliases: i/add=install, ls=list, rm/remove=uninstall, up=upgrade, find=search, info=show.
 
-Global options: `-D <directory>` / `--root <directory>` and `--config <file>`, once each, before or after the command. Attached `-Ddir` and `--root=dir` / `--config=file` are accepted. `-D` never changes the process working directory. Root precedence: explicit option, `NEOGET_ROOT`, platform user data directory plus `neoget`. Relative roots and explicit config files resolve against the original working directory. A root may contain one of `neoget.toml`, `neoget.yaml`, `neoget.yml`; multiple candidates are an error, not a precedence rule. Help, reference, and completion do not read configuration.
+Global options (once each, before or after the command):
+  -D/--driver <driver> — Select a provider driver, never a directory
+    Choices: winget, chocolatey, apt, pacman, dnf, yum, github, aqua.
+  --root <directory> — Select the Neoget configuration/data root
+  --config <file> — Select an explicit bundle file
+
+Attached `-Dapt` and `--driver=apt` / `--root=dir` / `--config=file` are accepted. `-D` selects a driver and never selects a directory. Conflicting explicit driver/target-provider selections fail. Root precedence: `--root`, `NEOGET_ROOT`, platform user data directory plus `neoget`. Relative roots and explicit config files resolve against the original working directory. A root may contain one of `neoget.toml`, `neoget.yaml`, `neoget.yml`; multiple candidates are an error, not a precedence rule. Help, reference, and completion do not read configuration.
 
 Only config checks and presentation execute today. Other commands fail with `CAPABILITY_UNAVAILABLE`; no database, scripts, package mutations, or Windows shim publication are performed.

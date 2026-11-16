@@ -110,16 +110,17 @@ impl ExecutableProbe for PathExecutableProbe {
         std::env::var_os("PATH").is_some_and(|paths| {
             std::env::split_paths(&paths).any(|directory| {
                 let candidate = directory.join(executable);
-                if executable_file(&candidate) {
-                    return true;
-                }
+                let direct = executable_file(&candidate);
                 #[cfg(windows)]
-                if candidate.extension().is_none() {
-                    return ["exe", "cmd", "bat"]
-                        .iter()
-                        .any(|extension| executable_file(&candidate.with_extension(extension)));
+                {
+                    direct
+                        || (candidate.extension().is_none()
+                            && ["exe", "cmd", "bat"].iter().any(|extension| {
+                                executable_file(&candidate.with_extension(extension))
+                            }))
                 }
-                false
+                #[cfg(not(windows))]
+                direct
             })
         })
     }

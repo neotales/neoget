@@ -52,7 +52,7 @@ fn config_checks_are_real_strict_format_explicit_and_do_not_create_state() {
     );
     fs::write(fixture.0.join("bundle.yaml"), "version: 1\nunknown: true").unwrap();
     assert!(error(fixture.run(&["config", "check", "bundle.yaml"])).contains("CONFIG_SYNTAX"));
-    fs::write(fixture.0.join("tools.yaml"), "tools: {}\n").unwrap();
+    fs::write(fixture.0.join("tools.yaml"), "tools: []\n").unwrap();
     assert!(
         fixture
             .run(&["config", "check-neoenv", "tools.yaml"])
@@ -72,8 +72,7 @@ fn roots_use_explicit_over_environment_and_ambiguous_configs_never_fall_back() {
     fs::create_dir(fixture.0.join("environment")).unwrap();
     fs::write(fixture.0.join("environment/neoget.toml"), "typo = 1").unwrap();
     assert!(error(fixture.run(&["list"])).contains("CONFIG_SYNTAX"));
-    assert!(error(fixture.run(&["-D", "explicit", "list"])).contains("CAPABILITY_UNAVAILABLE"));
-    assert!(error(fixture.run(&["list", "-Dexplicit"])).contains("CAPABILITY_UNAVAILABLE"));
+    assert!(error(fixture.run(&["--root", "explicit", "list"])).contains("CAPABILITY_UNAVAILABLE"));
     assert!(error(fixture.run(&["list", "--root=explicit"])).contains("CAPABILITY_UNAVAILABLE"));
     assert!(!fixture.0.join("explicit").exists());
     fs::write(fixture.0.join("selected.toml"), "version = 1").unwrap();
@@ -125,7 +124,8 @@ fn aliases_options_sources_pins_and_unsupported_features_have_truthful_errors() 
         vec!["-D"],
         vec!["-D", "--help"],
         vec!["--root="],
-        vec!["-Dx", "list", "--root=y"],
+        vec!["--root=x", "list", "--root=y"],
+        vec!["-Dapt", "list", "--driver=apt"],
         vec!["--config=x", "--config=y", "list"],
         vec!["sources", "add", "only-name"],
         vec!["pins", "add", "only-name"],
@@ -153,4 +153,99 @@ fn aliases_options_sources_pins_and_unsupported_features_have_truthful_errors() 
         );
     }
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
+}
+
+#[test]
+fn review_driver_is_not_a_directory_and_diagnostics_retain_safe_context() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join("environment")).unwrap();
+    fs::write(
+        fixture.0.join("environment/neoget.toml"),
+        "version = 1\nrenmae = 'PRIVATE_VALUE'\n",
+    )
+    .unwrap();
+    let message = error(fixture.run(&["-D", "apt", "list"]));
+    assert!(message.contains("CONFIG_SYNTAX"), "{message}");
+    assert!(message.contains("neoget.toml:2:"), "{message}");
+    assert!(
+        message.contains("unknown field") && message.contains("renmae"),
+        "{message}"
+    );
+    assert!(!message.contains("PRIVATE_VALUE"));
+    assert!(!message.contains(&fixture.0.display().to_string()));
+    assert!(error(fixture.run(&["--driver", "bogus", "list"])).contains("DRIVER_INVALID"));
+    assert!(
+        error(fixture.run(&["--root", "empty", "--driver=apt", "list"]))
+            .contains("CAPABILITY_UNAVAILABLE")
+    );
+    for selector in [
+        vec!["-D", "apt"],
+        vec!["-Dapt"],
+        vec!["--driver", "apt"],
+        vec!["--driver=apt"],
+    ] {
+        let mut args = vec!["list", "--root=empty"];
+        args.extend(selector);
+        let message = error(fixture.run(&args));
+        assert!(
+            message.contains("CAPABILITY_UNAVAILABLE") && message.contains("driver apt"),
+            "{message}"
+        );
+    }
+    assert!(
+        error(fixture.run(&["--driver=apt", "install", "github:owner/repo"]))
+            .contains("DRIVER_CONFLICT")
+    );
+    assert!(!fixture.0.join("apt").exists());
+}
+
+#[test]
+fn yaml_missing_files_and_nested_type_errors_render_causes_without_source_values() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("broken.yaml"), "version: 1\ntools:\n  demo:\n    provider: apt\n    package: demo\n    version: [PRIVATE_SCALAR]\n").unwrap();
+    let message = error(fixture.run(&["config", "check", "broken.yaml"]));
+    assert!(
+        message.contains("CONFIG_SYNTAX") && message.contains("broken.yaml:6:"),
+        "{message}"
+    );
+    assert!(
+        message.contains("caused by") && message.contains("invalid value type"),
+        "{message}"
+    );
+    assert!(!message.contains("PRIVATE_SCALAR"));
+    let message = error(fixture.run(&["config", "check", "missing.toml"]));
+    assert!(
+        message.contains("CONFIG_IO")
+            && message.contains("missing.toml")
+            && message.contains("caused by"),
+        "{message}"
+    );
+    assert!(!message.contains(&fixture.0.display().to_string()));
+}
+
+#[test]
+#[cfg(unix)]
+fn bash_driver_completion_executes_for_split_and_attached_selector_forms() {
+    let fixture = Fixture::new();
+    let completion = fixture.run(&["completion", "bash"]);
+    assert!(completion.status.success());
+    let source = String::from_utf8(completion.stdout).unwrap();
+    for (words, cursor, expected) in [
+        ("neoget install -D a", 3, "apt"),
+        ("neoget --driver a", 2, "aqua"),
+        ("neoget -Da", 1, "-Dapt"),
+        ("neoget --driver=a", 1, "--driver=apt"),
+    ] {
+        let script = format!(
+            "{source}\nCOMP_WORDS=({words}); COMP_CWORD={cursor}; _neoget; printf '%s\\n' \"${{COMPREPLY[@]}}\"\n"
+        );
+        let output = Command::new("bash").args(["-c", &script]).output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .any(|line| line == expected)
+        );
+    }
 }

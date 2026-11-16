@@ -63,9 +63,6 @@ dependencies = [
 [[package]]
 name = "neoget-providers"
 version = "0.1.0"
-dependencies = [
- "neoget-core",
-]
 
 [[package]]
 name = "proc-macro2"

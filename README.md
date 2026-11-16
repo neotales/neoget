@@ -5,13 +5,15 @@ Neoget is a standalone, daemonless Rust package-management foundation. The works
 Bundle v1 TOML/YAML validation, tool aliases, root selection, and pure owned
 GitHub binary selection/rename planning are available. See the
 [config contract](docs/config.md) and [implementation handoff](docs/config-handoff.md)
-for the focused tool-only interchange format and the unverified Neoenv compatibility boundary.
+for the native Neoenv tool-only profile and its explicit evaluator boundary.
 
 **Status:** initial scaffold plus eight provider adapter command-construction modules (winget, Chocolatey, apt, pacman, DNF, YUM, GitHub CLI, Aqua). They identify applicable platforms and construct selected inventory/upgrade argv vectors. These are pre-execution plans: there is no provider lifecycle execution, installed-package reconciliation, or claimed install/upgrade success. The provider library does expose a low-level streamed process API for constructed invocations; the CLI does not invoke it or execute package commands.
 
 ## Prerequisites
 
-Install Rust 1.98.1 with Cargo. The repository pins this toolchain in `rust-toolchain.toml`. The current development environment may not have Rust installed.
+Install Rust 1.100.0 with Cargo using global Mise (`mise use -g rust@1.100.0`).
+The repository pins this toolchain in `rust-toolchain.toml`; run the gates
+through the global Mise activation below.
 
 ## Quality commands
 
@@ -28,7 +30,7 @@ Rustfmt formatting is required before linting. `docs/commands.md` is generated f
 
 ## v0 command grammar
 
-The documented commands are `search`, `show`, `install`, `list`, `outdated`, `upgrade`, `uninstall`, `refresh`, `providers`, `plan`, `apply`, `status`, `continue`, `completion`, `tui`, and `mcp serve`. They are listed with usage in the [command reference](docs/commands.md).
+The documented commands include `search`, `show`, `install`, `list`, `outdated`, `upgrade`, `uninstall`, `refresh`, `providers`, `sources`, `pins`, `config`, `plan`, `apply`, `status`, `continue`, `completion`, `tui`, and `mcp serve`. They are listed with usage in the [command reference](docs/commands.md). `-D` / `--driver` selects a driver; `--root` selects a directory.
 
 Package targets use `[provider:]package[@exact-version]`, including scoped names such as `@scope/name`. Version text remains provider-native. Bare ambiguous names will require explicit resolution; installation will be idempotent and will not implicitly upgrade. Refresh is metadata-only. Provider-specific arguments after `--` are rejected until safe handling is designed.
 

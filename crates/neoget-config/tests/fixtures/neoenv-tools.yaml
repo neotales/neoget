@@ -1,0 +1,30 @@
+# Adapted from Neoenv's structured.rs and native URL/GitHub/Aqua tests (MIT).
+format_version: 1
+tools:
+  - id: first
+    version: 1.0.0
+    url: https://example.test/first
+    sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    binaries: [first]
+  - id: demo
+    version: v1.2.3
+    provider: github-release
+    github_release:
+      repository: owner/demo
+      asset: demo-{os}-{arch}.tar.gz
+      checksum_asset: checksums.txt
+    binaries: [demo]
+    binpath: bin/demo
+    platforms:
+      - os: linux
+        arch: amd64
+        asset: demo-linux-amd64.tar.gz
+        bindir: bin
+  - id: aqua-demo
+    version: 1.2.3
+    provider: aqua
+    aqua:
+      endpoint: https://example.test/aqua
+      registry_revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      package: owner/demo
+      manifest_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

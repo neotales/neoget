@@ -6,6 +6,73 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone, Copy)]
+enum GlobalKind {
+    Driver,
+    Root,
+    Config,
+}
+struct GlobalOption {
+    long: &'static str,
+    short: Option<&'static str>,
+    value: &'static str,
+    summary: &'static str,
+    choices: &'static [&'static str],
+    kind: GlobalKind,
+}
+const DRIVERS: &[&str] = &[
+    "winget",
+    "chocolatey",
+    "apt",
+    "pacman",
+    "dnf",
+    "yum",
+    "github",
+    "aqua",
+];
+const GLOBAL_OPTIONS: &[GlobalOption] = &[
+    GlobalOption {
+        long: "--driver",
+        short: Some("-D"),
+        value: "driver",
+        summary: "Select a provider driver, never a directory",
+        choices: DRIVERS,
+        kind: GlobalKind::Driver,
+    },
+    GlobalOption {
+        long: "--root",
+        short: None,
+        value: "directory",
+        summary: "Select the Neoget configuration/data root",
+        choices: &[],
+        kind: GlobalKind::Root,
+    },
+    GlobalOption {
+        long: "--config",
+        short: None,
+        value: "file",
+        summary: "Select an explicit bundle file",
+        choices: &[],
+        kind: GlobalKind::Config,
+    },
+];
+fn global_help() -> String {
+    let mut output = String::from("\nGlobal options (once each, before or after the command):\n");
+    for option in GLOBAL_OPTIONS {
+        output.push_str(&format!(
+            "  {}{} <{}> — {}\n",
+            option.short.map(|s| format!("{s}/")).unwrap_or_default(),
+            option.long,
+            option.value,
+            option.summary
+        ));
+        if !option.choices.is_empty() {
+            output.push_str(&format!("    Choices: {}.\n", option.choices.join(", ")));
+        }
+    }
+    output
+}
+
 const ALIASES: &[(&str, &str)] = &[
     ("i", "install"),
     ("add", "install"),
@@ -117,7 +184,7 @@ const CONFIG_CHILDREN: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "check-neoenv",
-        summary: "Validate a tool-only Neoenv interchange file",
+        summary: "Validate a native tool-only Neoenv file",
         availability: Availability::Available,
         arguments: &[Argument {
             name: "file",
@@ -409,8 +476,9 @@ fn command_help(path: &[&CommandSpec]) -> String {
         for item in COMMANDS {
             output.push_str(&format!("  {:<12} {}\n", item.name, item.summary));
         }
-        output.push_str("\nAliases: i/add=install, ls=list, rm/remove=uninstall, up=upgrade, find=search, info=show.\nGlobal options: -D/--root <directory>, --config <file> (once each, before or after the command).\n");
+        output.push_str("\nAliases: i/add=install, ls=list, rm/remove=uninstall, up=upgrade, find=search, info=show.\n");
     }
+    output.push_str(&global_help());
     output.push_str("\nTarget: [provider:]package[@exact-version] (scoped names such as @scope/name are supported)\n");
     output
 }
@@ -459,7 +527,9 @@ fn reference() -> String {
         append(&mut output, command, "");
     }
     output.push_str("Targets use `[provider:]package[@exact-version]`; scoped npm-style names such as `@scope/name` are valid. Provider arguments after `--` are rejected until safe forwarding is implemented.\n");
-    output.push_str("\nCommand aliases: i/add=install, ls=list, rm/remove=uninstall, up=upgrade, find=search, info=show.\n\nGlobal options: `-D <directory>` / `--root <directory>` and `--config <file>`, once each, before or after the command. Attached `-Ddir` and `--root=dir` / `--config=file` are accepted. `-D` never changes the process working directory. Root precedence: explicit option, `NEOGET_ROOT`, platform user data directory plus `neoget`. Relative roots and explicit config files resolve against the original working directory. A root may contain one of `neoget.toml`, `neoget.yaml`, `neoget.yml`; multiple candidates are an error, not a precedence rule. Help, reference, and completion do not read configuration.\n\nOnly config checks and presentation execute today. Other commands fail with `CAPABILITY_UNAVAILABLE`; no database, scripts, package mutations, or Windows shim publication are performed.\n");
+    output.push_str("\nCommand aliases: i/add=install, ls=list, rm/remove=uninstall, up=upgrade, find=search, info=show.\n");
+    output.push_str(&global_help());
+    output.push_str("\nAttached `-Dapt` and `--driver=apt` / `--root=dir` / `--config=file` are accepted. `-D` selects a driver and never selects a directory. Conflicting explicit driver/target-provider selections fail. Root precedence: `--root`, `NEOGET_ROOT`, platform user data directory plus `neoget`. Relative roots and explicit config files resolve against the original working directory. A root may contain one of `neoget.toml`, `neoget.yaml`, `neoget.yml`; multiple candidates are an error, not a precedence rule. Help, reference, and completion do not read configuration.\n\nOnly config checks and presentation execute today. Other commands fail with `CAPABILITY_UNAVAILABLE`; no database, scripts, package mutations, or Windows shim publication are performed.\n");
     output
 }
 
@@ -507,6 +577,23 @@ fn choices_at(command: &CommandSpec, position: usize) -> Vec<&'static str> {
 }
 
 fn nushell_completion() -> String {
+    fn global_parameters() -> Vec<String> {
+        GLOBAL_OPTIONS
+            .iter()
+            .map(|option| {
+                let flag = option
+                    .short
+                    .map(|short| format!("({short})"))
+                    .unwrap_or_default();
+                let value = if option.choices.is_empty() {
+                    "path".into()
+                } else {
+                    format!("string@'nu-complete neoget {}'", option.value)
+                };
+                format!("{}{flag}: {value}", option.long)
+            })
+            .collect()
+    }
     fn completer(output: &mut String, name: &str, choices: &[&str]) {
         let values = choices
             .iter()
@@ -540,6 +627,7 @@ fn nushell_completion() -> String {
                 }
                 parameters.push(parameter);
             }
+            parameters.extend(global_parameters());
             parameters.push("--help(-h)".into());
             output.push_str(&format!("extern \"{name}\" [{}]\n", parameters.join(", ")));
             append(output, command.children, &name);
@@ -551,8 +639,32 @@ fn nushell_completion() -> String {
     let mut output =
         String::from("# Completion signatures only; argument validation belongs to neoget.\n");
     completer(&mut output, "neoget command", &top_candidates());
-    output.push_str("extern neoget [command?: string@'nu-complete neoget command', ...args: string, --help(-h), --reference]\n");
+    for option in GLOBAL_OPTIONS
+        .iter()
+        .filter(|option| !option.choices.is_empty())
+    {
+        completer(
+            &mut output,
+            &format!("neoget {}", option.value),
+            option.choices,
+        );
+    }
+    output.push_str(&format!("extern neoget [command?: string@'nu-complete neoget command', ...args: string, {}, --help(-h), --reference]\n", global_parameters().join(", ")));
     append(&mut output, COMMANDS, "neoget");
+    for (alias, canonical) in ALIASES {
+        let command = COMMANDS
+            .iter()
+            .find(|command| command.name == *canonical)
+            .expect("canonical alias");
+        append(
+            &mut output,
+            &[CommandSpec {
+                name: alias,
+                ..*command
+            }],
+            "neoget",
+        );
+    }
     output
 }
 
@@ -563,7 +675,15 @@ fn completion(shell: &str) -> Result<String, String> {
             SHELLS.join(", ")
         ));
     }
-    let top = top_candidates().join(" ");
+    let top = top_candidates()
+        .into_iter()
+        .chain(
+            GLOBAL_OPTIONS
+                .iter()
+                .flat_map(|option| std::iter::once(option.long).chain(option.short)),
+        )
+        .collect::<Vec<_>>()
+        .join(" ");
     let choices: Vec<_> = COMMANDS
         .iter()
         .map(|command| (command.name, candidates_for(&[command.name]).join(" ")))
@@ -571,6 +691,36 @@ fn completion(shell: &str) -> Result<String, String> {
         .collect();
     let output = match shell {
         "bash" => {
+            let globals = GLOBAL_OPTIONS
+                .iter()
+                .map(|option| {
+                    let names = option
+                        .short
+                        .map(|short| format!("|{short}"))
+                        .unwrap_or_default();
+                    let values = if option.choices.is_empty() {
+                        match option.kind {
+                            GlobalKind::Root => "-d".into(),
+                            _ => "-f".into(),
+                        }
+                    } else {
+                        format!("-W '{}'", option.choices.join(" "))
+                    };
+                    format!(
+                        "    {}{names}) COMPREPLY=( $(compgen {values} -- \"$cur\") ); return ;;\n",
+                        option.long
+                    )
+                })
+                .collect::<String>();
+            let attached = GLOBAL_OPTIONS.iter().filter(|option| !option.choices.is_empty()).map(|option| {
+                let long = option.choices.iter().map(|value| format!("{}={value}", option.long)).collect::<Vec<_>>().join(" ");
+                let mut rules = format!("    {}=*) COMPREPLY=( $(compgen -W '{long}' -- \"$cur\") ); return ;;\n", option.long);
+                if let Some(short) = option.short {
+                    let values = option.choices.iter().map(|value| format!("{short}{value}")).collect::<Vec<_>>().join(" ");
+                    rules.push_str(&format!("    {short}*) COMPREPLY=( $(compgen -W '{values}' -- \"$cur\") ); return ;;\n"));
+                }
+                rules
+            }).collect::<String>();
             let rules = choices
                 .iter()
                 .map(|(name, values)| {
@@ -578,20 +728,58 @@ fn completion(shell: &str) -> Result<String, String> {
                 })
                 .collect::<String>();
             format!(
-                "_neoget() {{\n  local cur\n  cur=\"${{COMP_WORDS[COMP_CWORD]}}\"\n  case \"${{COMP_CWORD}}:${{COMP_WORDS[1]}}\" in\n    1:*) COMPREPLY=( $(compgen -W '{top}' -- \"$cur\") ) ;;\n{rules}    *) COMPREPLY=() ;;\n  esac\n}}\ncomplete -F _neoget neoget\n"
+                "_neoget() {{\n  local cur\n  cur=\"${{COMP_WORDS[COMP_CWORD]}}\"\n  case \"${{COMP_WORDS[COMP_CWORD-1]}}\" in\n{globals}  esac\n  case \"$cur\" in\n{attached}  esac\n  case \"${{COMP_CWORD}}:${{COMP_WORDS[1]}}\" in\n    1:*) COMPREPLY=( $(compgen -W '{top}' -- \"$cur\") ) ;;\n{rules}    *) COMPREPLY=() ;;\n  esac\n}}\ncomplete -F _neoget neoget\n"
             )
         }
         "zsh" => {
+            let globals = GLOBAL_OPTIONS
+                .iter()
+                .map(|option| {
+                    let values = if option.choices.is_empty() {
+                        "_files".into()
+                    } else {
+                        format!("({})", option.choices.join(" "))
+                    };
+                    let long = format!(
+                        "'{}[{}]:{}:{values}'",
+                        option.long, option.summary, option.value
+                    );
+                    match option.short {
+                        Some(short) => format!(
+                            "'{short}[{}]:{}:{values}' {long}",
+                            option.summary, option.value
+                        ),
+                        None => long,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
             let rules = choices
                 .iter()
                 .map(|(name, values)| format!("    {name}) _values argument {values} ;;\n"))
                 .collect::<String>();
             format!(
-                "#compdef neoget\n_arguments '1:command:({top})' '2:argument:->argument'\nif (( CURRENT == 3 )); then\n  case $words[2] in\n{rules}  esac\nfi\n"
+                "#compdef neoget\n_arguments {globals} '1:command:({top})' '2:argument:->argument'\nif (( CURRENT == 3 )); then\n  case $words[2] in\n{rules}  esac\nfi\n"
             )
         }
         "fish" => {
             let mut text = String::from("complete -c neoget -f\n");
+            for option in GLOBAL_OPTIONS {
+                let short = option
+                    .short
+                    .map(|short| format!(" -s {}", &short[1..]))
+                    .unwrap_or_default();
+                text.push_str(&format!(
+                    "complete -c neoget -l {}{short} -r -d '{}'{}\n",
+                    &option.long[2..],
+                    option.summary,
+                    if option.choices.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" -f -a '{}'", option.choices.join(" "))
+                    }
+                ));
+            }
             for command in COMMANDS {
                 text.push_str(&format!(
                     "complete -c neoget -n '__fish_use_subcommand' -a '{}' -d '{}'\n",
@@ -609,9 +797,19 @@ fn completion(shell: &str) -> Result<String, String> {
             text
         }
         "powershell" => {
+            let globals = GLOBAL_OPTIONS.iter().filter(|option| !option.choices.is_empty()).map(|option| {
+                let short = option.short.map(|short| format!(" -or $previous -eq '{short}'")).unwrap_or_default();
+                format!("if ($previous -eq '{}'{short}) {{ $candidates='{}'.Split(' '); $candidates | Where-Object {{ $_ -like \"$wordToComplete*\" }}; return }}; ", option.long, option.choices.join(" "))
+            }).collect::<String>();
+            let attached = GLOBAL_OPTIONS.iter().filter(|option| !option.choices.is_empty()).flat_map(|option| {
+                std::iter::once(format!("{}=", option.long)).chain(option.short.map(str::to_owned)).map(|prefix| {
+                    let values = option.choices.iter().map(|choice| format!("{prefix}{choice}")).collect::<Vec<_>>().join(" ");
+                    format!("if ($wordToComplete -like '{prefix}*') {{ '{values}'.Split(' ') | Where-Object {{ $_ -like \"$wordToComplete*\" }}; return }}; ")
+                }).collect::<Vec<_>>()
+            }).collect::<String>();
             let rules = choices.iter().map(|(name, values)| format!(" elseif ($words[1] -eq '{name}' -and $words.Count -le 3) {{ '{values}'.Split(' ') }}")).collect::<String>();
             format!(
-                "Register-ArgumentCompleter -Native -CommandName neoget -ScriptBlock {{ param($wordToComplete,$commandAst,$cursorPosition) $words=$commandAst.ToString().Split(' '); $candidates=if ($words.Count -le 2) {{ '{top}'.Split(' ') }}{rules} else {{ @() }}; $candidates | Where-Object {{ $_ -like \"$wordToComplete*\" }} }}\n"
+                "Register-ArgumentCompleter -Native -CommandName neoget -ScriptBlock {{ param($wordToComplete,$commandAst,$cursorPosition) $words=$commandAst.ToString().Split(' '); $previous=if ($words.Count -ge 2) {{ $words[$words.Count-2] }} else {{ '' }}; {globals}{attached}$candidates=if ($words.Count -le 2) {{ '{top}'.Split(' ') }}{rules} else {{ @() }}; $candidates | Where-Object {{ $_ -like \"$wordToComplete*\" }} }}\n"
             )
         }
         "nushell" => nushell_completion(),
@@ -746,29 +944,57 @@ fn run_command(args: &[String], options: &Options) -> Result<String, String> {
         return completion(&arguments[0]);
     }
     if path.first().is_some_and(|command| command.name == "config") {
-        let (input, format) = read_config(Path::new(&arguments[0]))?;
-        if command.name == "check" {
-            neoget_config::parse_bundle(&input, format).map_err(|error| error.to_string())?;
-        } else {
-            neoget_config::parse_neoenv_tools(&input, format).map_err(|error| error.to_string())?;
-        }
+        check_config_file(Path::new(&arguments[0]), command.name == "check-neoenv")?;
         return Ok("Configuration valid (no operations executed).\n".into());
     }
+    if let Some(driver) = &options.driver {
+        let target = if command.name == "plan"
+            && arguments.first().is_some_and(|action| {
+                matches!(
+                    action.as_str(),
+                    "show" | "install" | "upgrade" | "uninstall"
+                )
+            }) {
+            arguments.get(1)
+        } else if matches!(command.name, "show" | "install" | "upgrade" | "uninstall")
+            || (path.first().is_some_and(|command| command.name == "pins") && command.name == "add")
+        {
+            arguments.first()
+        } else {
+            None
+        };
+        if let Some(target) = target
+            && neoget_core::PackageTarget::parse(target)
+                .map_err(|error| error.to_string())?
+                .provider
+                .is_some_and(|provider| provider.as_str() != driver)
+        {
+            return Err(
+                "DRIVER_CONFLICT: explicit target provider differs from selected driver".into(),
+            );
+        }
+    }
     validate_selected_config(options)?;
+    let driver = options
+        .driver
+        .as_ref()
+        .map(|driver| format!(" (driver {driver})"))
+        .unwrap_or_default();
     if command.availability == Availability::Planned {
         return Err(format!(
-            "CAPABILITY_UNAVAILABLE: '{}' is documented but not implemented in v0",
+            "CAPABILITY_UNAVAILABLE: '{}' is documented but not implemented in v0{driver}",
             command.name
         ));
     }
     Err(format!(
-        "CAPABILITY_UNAVAILABLE: '{}' is specified but its operation is not implemented in v0",
+        "CAPABILITY_UNAVAILABLE: '{}' is specified but its operation is not implemented in v0{driver}",
         command.name
     ))
 }
 
 #[derive(Default)]
 struct Options {
+    driver: Option<String>,
     root: Option<PathBuf>,
     config: Option<PathBuf>,
 }
@@ -781,28 +1007,35 @@ fn grammar(args: &[String]) -> Result<(Vec<String>, Options), String> {
         if token == "--" {
             return Err("provider argument forwarding after '--' is not supported yet".into());
         }
-        let option = if token == "-D" || token == "--root" {
-            Some((&mut options.root, cursor.next().map(String::as_str)))
-        } else if token == "--config" {
-            Some((&mut options.config, cursor.next().map(String::as_str)))
-        } else if let Some(value) = token
-            .strip_prefix("--root=")
-            .or_else(|| token.strip_prefix("-D"))
-        {
-            Some((&mut options.root, Some(value)))
-        } else if let Some(value) = token.strip_prefix("--config=") {
-            Some((&mut options.config, Some(value)))
-        } else {
-            None
-        };
-        if let Some((slot, value)) = option {
-            if slot.is_some() {
-                return Err("duplicate global option".into());
+        let option = GLOBAL_OPTIONS.iter().find_map(|option| {
+            if token == option.long || option.short.is_some_and(|short| token == short) {
+                Some((option, None))
+            } else {
+                token
+                    .strip_prefix(&format!("{}=", option.long))
+                    .or_else(|| option.short.and_then(|short| token.strip_prefix(short)))
+                    .map(|value| (option, Some(value)))
             }
+        });
+        if let Some((option, attached)) = option {
+            let value = attached.or_else(|| cursor.next().map(String::as_str));
             let value = value
                 .filter(|v| !v.is_empty() && !v.starts_with('-'))
-                .ok_or("global option requires a nonempty path value")?;
-            *slot = Some(PathBuf::from(value));
+                .ok_or("global option requires a nonempty value")?;
+            if !option.choices.is_empty() && !option.choices.contains(&value) {
+                return Err(format!(
+                    "DRIVER_INVALID: choose {}",
+                    option.choices.join(", ")
+                ));
+            }
+            let duplicate = match option.kind {
+                GlobalKind::Driver => options.driver.replace(value.into()).is_some(),
+                GlobalKind::Root => options.root.replace(PathBuf::from(value)).is_some(),
+                GlobalKind::Config => options.config.replace(PathBuf::from(value)).is_some(),
+            };
+            if duplicate {
+                return Err("duplicate global option".into());
+            }
         } else {
             tokens.push(token.clone());
         }
@@ -819,17 +1052,92 @@ fn read_config(path: &Path) -> Result<(String, neoget_config::Format), String> {
     let format = match path.extension().and_then(|extension| extension.to_str()) {
         Some("toml") => neoget_config::Format::Toml,
         Some("yaml" | "yml") => neoget_config::Format::Yaml,
-        _ => return Err("CONFIG_FORMAT: expected .toml, .yaml, or .yml".into()),
+        _ => {
+            return Err(format!(
+                "CONFIG_FORMAT: {}: expected .toml, .yaml, or .yml",
+                safe_config_name(path)
+            ));
+        }
     };
-    let file = File::open(path).map_err(|_| "CONFIG_IO: cannot open configuration")?;
+    let file = File::open(path).map_err(|cause| {
+        render_config_error(
+            path,
+            "",
+            &neoget_core::CoreError::provider_failure_with_source(
+                "CONFIG_IO",
+                "cannot open configuration",
+                cause,
+            ),
+        )
+    })?;
     let mut input = String::new();
     file.take(1024 * 1024 + 1)
         .read_to_string(&mut input)
-        .map_err(|_| "CONFIG_IO: cannot read UTF-8 configuration")?;
+        .map_err(|cause| {
+            render_config_error(
+                path,
+                "",
+                &neoget_core::CoreError::provider_failure_with_source(
+                    "CONFIG_IO",
+                    "cannot read UTF-8 configuration",
+                    cause,
+                ),
+            )
+        })?;
     if input.len() > 1024 * 1024 {
-        return Err("CONFIG_INVALID: configuration exceeds 1 MiB".into());
+        return Err(format!(
+            "CONFIG_INVALID: {}: configuration exceeds 1 MiB",
+            safe_config_name(path)
+        ));
     }
     Ok((input, format))
+}
+
+fn safe_config_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= 128
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+        .unwrap_or("<config>")
+        .to_owned()
+}
+
+fn render_config_error(path: &Path, input: &str, error: &neoget_core::CoreError) -> String {
+    use std::error::Error;
+    let name = safe_config_name(path);
+    let mut output = format!("{error}\n  config: {name}");
+    let mut cause = error.source();
+    // Bound presentation even if a third-party error ever contains a cycle.
+    for _ in 0..8 {
+        let Some(current) = cause else { break };
+        if let Some(detail) = neoget_config::parse_diagnostic(current, input) {
+            output.push_str(&format!(
+                "\n  caused by: {name}:{}:{}: {}",
+                detail.line, detail.column, detail.message
+            ));
+        } else if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            output.push_str(&format!("\n  caused by: {io}"));
+        } else {
+            output.push_str("\n  caused by: configuration processing failed (details redacted)");
+        }
+        cause = current.source();
+    }
+    output
+}
+
+fn check_config_file(path: &Path, neoenv: bool) -> Result<(), String> {
+    let (input, format) = read_config(path)?;
+    let result = if neoenv {
+        neoget_config::parse_neoenv_tools(&input, format).map(|_| ())
+    } else {
+        neoget_config::parse_bundle(&input, format).map(|_| ())
+    };
+    result.map_err(|error| render_config_error(path, &input, &error))
 }
 
 fn validate_selected_config(options: &Options) -> Result<(), String> {
@@ -869,7 +1177,17 @@ fn validate_selected_config(options: &Options) -> Result<(), String> {
             match path.try_exists() {
                 Ok(true) => candidates.push(path),
                 Ok(false) => {}
-                Err(_) => return Err("CONFIG_IO: cannot inspect root configuration".into()),
+                Err(cause) => {
+                    return Err(render_config_error(
+                        &path,
+                        "",
+                        &neoget_core::CoreError::provider_failure_with_source(
+                            "CONFIG_IO",
+                            "cannot inspect root configuration",
+                            cause,
+                        ),
+                    ));
+                }
             }
         }
         if candidates.len() > 1 {
@@ -878,8 +1196,7 @@ fn validate_selected_config(options: &Options) -> Result<(), String> {
         candidates.pop()
     };
     if let Some(path) = selected {
-        let (input, format) = read_config(&path)?;
-        neoget_config::parse_bundle(&input, format).map_err(|error| error.to_string())?;
+        check_config_file(&path, false)?;
     }
     Ok(())
 }
@@ -1042,10 +1359,24 @@ mod tests {
         assert!(powershell.contains("Register-ArgumentCompleter -Native -CommandName neoget"));
 
         let nushell = run(&strings(&["completion", "nushell"])).unwrap();
-        assert!(nushell.contains("extern neoget [command?: string@'nu-complete neoget command', ...args: string, --help(-h), --reference]"));
-        assert!(nushell.contains("extern \"neoget plan\" [action?: string@'nu-complete neoget plan action', target?: string, --help(-h)]"));
-        assert!(nushell.contains("extern \"neoget completion\" [shell?: string@'nu-complete neoget completion shell', --help(-h)]"));
-        assert!(nushell.contains("extern \"neoget mcp\" [subcommand?: string@'nu-complete neoget mcp subcommand', --help(-h)]"));
+        assert!(nushell.contains("extern neoget [command?: string@'nu-complete neoget command', ...args: string, --driver(-D):"));
+        assert!(nushell.contains("extern \"neoget plan\" [action?: string@'nu-complete neoget plan action', target?: string, --driver(-D):"));
+        assert!(nushell.contains("extern \"neoget completion\" [shell?: string@'nu-complete neoget completion shell', --driver(-D):"));
+        assert!(nushell.contains("extern \"neoget mcp\" [subcommand?: string@'nu-complete neoget mcp subcommand', --driver(-D):"));
+        assert!(nushell.contains("extern \"neoget i\" [target?: string, --driver(-D):"));
+        for shell in SHELLS {
+            let artifact = completion(shell).unwrap();
+            for option in GLOBAL_OPTIONS {
+                assert!(
+                    artifact.contains(option.long.trim_start_matches('-')),
+                    "{shell} missing {}",
+                    option.long
+                );
+                for driver in option.choices {
+                    assert!(artifact.contains(driver), "{shell} missing driver choice");
+                }
+            }
+        }
         assert!(!nushell.contains("^neoget"));
         assert!(
             nushell
@@ -1079,6 +1410,13 @@ mod tests {
                             assert!(definition.contains(&format!("'{choice}'")));
                         }
                     }
+                }
+                for option in GLOBAL_OPTIONS {
+                    assert!(
+                        declaration.contains(option.long),
+                        "{name} missing {}",
+                        option.long
+                    );
                 }
                 check_externs(text, command.children, &name);
             }

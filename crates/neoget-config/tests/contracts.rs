@@ -178,16 +178,15 @@ fn member_selection_is_bounded_literal_unique_and_rejects_unsafe_metadata() {
 
 #[test]
 fn tool_only_interchange_never_swallows_other_neoenv_domains() {
-    let input = r#"[tools.fd]
-provider = "github"
-package = "sharkdp/fd"
-[tools.fd.asset]
-exact = "fd.tar.gz"
+    let input = r#"[[tools]]
+id = "fd"
+version = "v10.0"
+provider = "github-release"
+[tools.github_release]
+repository = "sharkdp/fd"
+asset = "fd.tar.gz"
 "#;
-    assert_eq!(
-        parse_neoenv_tools(input, Format::Toml).unwrap()["fd"].package,
-        "sharkdp/fd"
-    );
+    assert_eq!(parse_neoenv_tools(input, Format::Toml).unwrap()[0].id, "fd");
     for suffix in [
         "\n[env]\nFOO = 'bar'",
         "\n[tasks]\nx = 'echo hi'",
@@ -196,7 +195,8 @@ exact = "fd.tar.gz"
         assert!(parse_neoenv_tools(&format!("{input}{suffix}"), Format::Toml).is_err());
     }
     assert!(parse_neoenv_tools("tools: {}\nremote: {}", Format::Yaml).is_err());
-    assert!(parse_neoenv_tools("tools: {}", Format::Yaml).is_ok());
+    assert!(parse_neoenv_tools("tools: []", Format::Yaml).is_ok());
+    assert!(parse_neoenv_tools("tools: {}", Format::Yaml).is_err());
 }
 
 #[test]
@@ -218,4 +218,22 @@ fn root_resolution_is_pure_and_has_one_precedence_order() {
         cwd.join(default)
     );
     assert!(select_root(Some(Path::new("")), None, default, cwd).is_err());
+}
+
+#[test]
+fn published_config_examples_are_checked_against_their_actual_schema() {
+    let document = include_str!("../../../docs/config.md");
+    let mut checked = 0;
+    for (label, format) in [("toml", Format::Toml), ("yaml", Format::Yaml)] {
+        for block in document.split(&format!("```{label}\n")).skip(1) {
+            let input = block.split_once("```").unwrap().0;
+            if input.contains("format_version") {
+                parse_neoenv_tools(input, format).unwrap();
+            } else {
+                parse_bundle(input, format).unwrap();
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 4);
 }

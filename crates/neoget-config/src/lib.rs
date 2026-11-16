@@ -6,6 +6,12 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
+mod neoenv;
+pub use neoenv::*;
+mod roots;
+pub use roots::*;
+mod diagnostic;
+pub use diagnostic::{ParseDiagnostic, parse_diagnostic};
 
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const MAX_ENTRIES: usize = 1024;
@@ -22,6 +28,8 @@ pub enum Format {
 #[serde(deny_unknown_fields)]
 pub struct Bundle {
     pub version: u32,
+    #[serde(default)]
+    pub bin: BinDirectories,
     #[serde(default, deserialize_with = "unique_map")]
     pub tools: BTreeMap<String, Tool>,
     #[serde(default, deserialize_with = "unique_strings")]
@@ -228,36 +236,22 @@ pub fn parse_bundle(input: &str, format: Format) -> Outcome<Bundle> {
     Ok(bundle)
 }
 
-/// Focused Neoenv interchange envelope. Only tool declarations are accepted.
-/// Other Neoenv domains (env, hooks, tasks, runtime, remote) are intentionally errors.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NeoenvTools {
-    #[serde(deserialize_with = "unique_map")]
-    tools: BTreeMap<String, Tool>,
-}
-
-/// Parse the tool-only Neoenv envelope using the same strict tool declarations.
-/// This is not a full Neoenv configuration evaluator.
-pub fn parse_neoenv_tools(input: &str, format: Format) -> Outcome<BTreeMap<String, Tool>> {
-    let parsed: NeoenvTools = parse(input, format)?;
-    let bundle = Bundle {
-        version: 1,
-        tools: parsed.tools,
-        aliases: BTreeMap::new(),
-        sources: BTreeMap::new(),
-        pins: BTreeMap::new(),
-    };
-    bundle.validate()?;
-    Ok(bundle.tools)
-}
-
 impl Bundle {
     /// Validate manually constructed bundles as well as parsed ones.
     /// Performs no I/O and rejects conflicts instead of merging declarations.
     pub fn validate(&self) -> Outcome<()> {
         if self.version != 1 {
             return Err(invalid("only bundle version 1 is supported"));
+        }
+        for path in [self.bin.user.as_deref(), self.bin.global.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
+                return Err(invalid(
+                    "bin directory must be a nonempty bounded path without controls",
+                ));
+            }
         }
         if self.tools.len() + self.aliases.len() + self.sources.len() + self.pins.len()
             > MAX_ENTRIES
